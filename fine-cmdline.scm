@@ -150,7 +150,7 @@
         "offset-y" #f)) ; #f = center, or specify offset
 
 (define (fine-cmdline-config! key value)
-  (hash-set! *fine-cmdline-config* key value))
+  (set! *fine-cmdline-config* (hash-insert *fine-cmdline-config* key value)))
 
 (define (cmdline-render state rect frame)
   (define width (area-width rect))
@@ -181,10 +181,13 @@
   (define num-completions (length completions))
   (define has-completions? (and (> num-completions 0) (> (string-length input-str) 0)))
   
+  ; completion-height is number of completion rows to display
   (define completion-height (if has-completions?
                                (min num-completions max-completions)
                                0))
-  (define cmd-height (+ 1 completion-height))
+  
+  ; Height: 1 input row + completion rows + 1 bottom border (top border at row 0)
+  (define cmd-height (+ 3 completion-height))
   
   ; Position calculation
   (define center-x (round (/ (- width cmd-width) 2)))
