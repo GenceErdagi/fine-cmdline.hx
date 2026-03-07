@@ -9,7 +9,8 @@
 (require "helix/ext.scm")
 
 (provide fine-cmdline
-         fine-cmdline/open)
+         fine-cmdline/open
+         fine-cmdline-config!)
 
 ; ============================================================
 ; Helper Functions
@@ -141,6 +142,16 @@
 ; Rendering
 ; ============================================================
 
+; Configuration for fine-cmdline
+(define *fine-cmdline-config* 
+  (hash "width" 60
+        "max-completions" 8
+        "offset-x" #f  ; #f = center, or specify offset
+        "offset-y" #f)) ; #f = center, or specify offset
+
+(define (fine-cmdline-config! key value)
+  (hash-set! *fine-cmdline-config* key value))
+
 (define (cmdline-render state rect frame)
   (define width (area-width rect))
   (define height (area-height rect))
@@ -160,15 +171,32 @@
         (style-bg (style->bg (theme-scope "ui.selection")))
         (style-fg (style->fg (theme-scope "ui.text")))))
   
-  ; Calculate a smaller centered area for the input
-  (define cmd-width 60)
-  (define cmd-height (if (> (length completions) 0) 4 1))
+  ; Get config values
+  (define cmd-width (hash-get *fine-cmdline-config* "width"))
+  (define max-completions (hash-get *fine-cmdline-config* "max-completions"))
+  (define offset-x (hash-get *fine-cmdline-config* "offset-x"))
+  (define offset-y (hash-get *fine-cmdline-config* "offset-y"))
   
-  (define center-x (round (/ (- (area-width rect) cmd-width) 2)))
-  (define center-y (round (/ (area-height rect) 4)))
+  ; Dynamic height based on completions
+  (define num-completions (length completions))
+  (define has-completions? (and (> num-completions 0) (> (string-length input-str) 0)))
   
-  (define cmd-area (area (+ (area-x rect) center-x)
-                          (+ (area-y rect) center-y)
+  (define completion-height (if has-completions?
+                               (min num-completions max-completions)
+                               0))
+  (define cmd-height (+ 1 completion-height))
+  
+  ; Position calculation
+  (define center-x (round (/ (- width cmd-width) 2)))
+  (define center-y (round (/ (- height cmd-height) 2)))
+  
+  ; Apply offsets if configured
+  (define final-x (if offset-x (+ center-x offset-x) center-x))
+  (define final-y (if offset-y (+ center-y offset-y) center-y))
+  (define final-y (max final-y 1))
+  
+  (define cmd-area (area (+ (area-x rect) final-x)
+                          (+ (area-y rect) final-y)
                           cmd-width
                           cmd-height))
   
@@ -196,16 +224,21 @@
   (set-position-col! (CmdlineState-cursor-position state)
                      (+ (area-x cmd-area) prompt-len 1 (string-length input-str)))
   
-  (when (and (> (length completions) 0) (> (string-length input-str) 0) (> cmd-height 1))
+  ; Render completions
+  (when has-completions?
     (define completion-y (+ (area-y cmd-area) 2))
-    (define completion-list (slice completions 0 (min 3 (length completions))))
+    (define completion-list (slice completions 0 completion-height))
     
     (for-index (lambda (i comp)
                  (define is-selected (= i completion-index))
+                 ; Truncate if longer than width
+                 (define display-comp (if (> (string-length comp) (- cmd-width 2))
+                                         (string-append (substring comp 0 (- cmd-width 5)) "...")
+                                         comp))
                  (frame-set-string! frame
                                     (+ (area-x cmd-area) 1)
                                     (+ completion-y i)
-                                    (string-append " " comp)
+                                    (string-append " " display-comp)
                                     (if is-selected 
                                         selected-completion-style 
                                         completion-style)))

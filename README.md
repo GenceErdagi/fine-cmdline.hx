@@ -58,6 +58,24 @@ Bind a key to open the fine command line. Add to your Steel config:
 
 ## Configuration
 
+### Position and Size
+
+You can customize the popup position and behavior:
+
+```scheme
+(require "fine-cmdline")
+
+; Configure width (default: 60)
+(fine-cmdline-config! "width" 80)
+
+; Configure max completions to show (default: 8)
+(fine-cmdline-config! "max-completions" 10)
+
+; Position offset from center (use #f for center, or specify offset)
+(fine-cmdline-config! "offset-x" -10)  ; 10 chars left of center
+(fine-cmdline-config! "offset-y" 5)    ; 5 rows down from center
+```
+
 ### Custom Commands List
 
 You can modify the `get-all-commands` function in `fine-cmdline.scm` to add or remove commands from the completion list.
