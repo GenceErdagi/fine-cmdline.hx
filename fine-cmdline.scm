@@ -39,6 +39,26 @@
        (helper (cdr chars) (cons (car chars) current) result)]))
   (helper (string->list s) '() '()))
 
+(define (get-directory-part path)
+  (define (find-last-slash chars last-slash-pos current-pos)
+    (cond [(null? chars) last-slash-pos]
+          [(char=? (car chars) #\/) (find-last-slash (cdr chars) current-pos (+ current-pos 1))]
+          [else (find-last-slash (cdr chars) last-slash-pos (+ current-pos 1))]))
+  (define last-pos (find-last-slash (string->list path) -1 0))
+  (if (= last-pos -1)
+      "."
+      (if (= last-pos 0)
+          "/"
+          (substring path 0 last-pos))))
+
+(define (get-file-part path)
+  (define (find-last-slash chars last-slash-pos current-pos)
+    (cond [(null? chars) last-slash-pos]
+          [(char=? (car chars) #\/) (find-last-slash (cdr chars) current-pos (+ current-pos 1))]
+          [else (find-last-slash (cdr chars) last-slash-pos (+ current-pos 1))]))
+  (define last-pos (find-last-slash (string->list path) -1 0))
+  (substring path (+ last-pos 1) (string-length path)))
+
 (define (join-strings lst sep)
   (if (null? lst)
       ""
@@ -72,6 +92,7 @@
    history-index                   ; Box int - current position in history
    cursor-position                 ; Position - where cursor is rendered
    completion-index                ; Box int - selected completion
+   window-start                    ; Box int - for scrollable list
    completions                     ; Box list - available completions
    all-commands) #:mutable)
 
@@ -140,6 +161,13 @@
          (loop (+ pi 1) (+ ti 1))]
         [else (loop pi (+ ti 1))]))))
 
+(define (string-ends-with? s suffix)
+  (let ([slen (string-length s)]
+        [sublen (string-length suffix)])
+    (if (< slen sublen)
+        #f
+        (string=? (substring s (- slen sublen) slen) suffix))))
+
 (define (get-completions input all-commands)
   (if (string=? input "")
       all-commands
@@ -148,12 +176,53 @@
              [has-bang? (and (> (string-length first-word) 0)
                              (char=? (string-ref first-word (- (string-length first-word) 1)) #\!))]
              [base-word (if has-bang? (substring first-word 0 (- (string-length first-word) 1)) first-word)])
-        (if (string=? base-word "")
-            '()
-            (let ([matches (filter (lambda (cmd) (fuzzy-match? base-word cmd)) all-commands)])
-              (if has-bang?
-                  (map (lambda (m) (string-append m "!")) matches)
-                  matches))))))
+        
+        (cond 
+          ; Argument completion
+          [(and (not (null? parts)) (or (> (length parts) 1) 
+                                       (char=? (string-ref input (- (string-length input) 1)) #\space)))
+           (let* ([cmd (car parts)]
+                  [last-part (if (char=? (string-ref input (- (string-length input) 1)) #\space)
+                                 ""
+                                 (list-ref parts (- (length parts) 1)))]
+                  [prefix (substring input 0 (- (string-length input) (string-length last-part)))])
+             
+             (cond
+               [(member cmd '("theme"))
+                (let ([themes (themes->list)])
+                  (map (lambda (t) (string-append prefix t))
+                       (filter (lambda (t) (fuzzy-match? last-part t)) themes)))]
+               
+               [(member cmd '("open" "e" "vsplit" "vs" "hsplit" "hs"))
+                (let* ([last-slash-pos (let loop ([chars (string->list last-part)] [last -1] [curr 0])
+                                         (cond [(null? chars) last]
+                                               [(char=? (car chars) #\/) (loop (cdr chars) curr (+ curr 1))]
+                                               [else (loop (cdr chars) last (+ curr 1))]))]
+                       [dir-to-read (cond [(= last-slash-pos -1) "."]
+                                          [(= last-slash-pos 0) "/"]
+                                          [else (substring last-part 0 last-slash-pos)])]
+                       [dir-prefix (if (= last-slash-pos -1) "" (substring last-part 0 (+ last-slash-pos 1)))]
+                       [file-p (substring last-part (+ last-slash-pos 1) (string-length last-part))]
+                       [entries (if (is-dir? dir-to-read) (read-dir dir-to-read) '())])
+                  (map (lambda (e) 
+                         (let* ([m (file-name e)]
+                                [full-path (string-append (if (string=? dir-to-read ".") "" 
+                                                              (if (string-ends-with? dir-to-read "/") 
+                                                                  dir-to-read 
+                                                                  (string-append dir-to-read "/"))) m)]
+                                [display-path (string-append dir-prefix m (if (is-dir? full-path) "/" ""))])
+                           (string-append prefix display-path)))
+                       (filter (lambda (e) (fuzzy-match? file-p (file-name e))) entries)))]
+               
+               [else '()]))]
+          
+          ; Command completion
+          [(string=? base-word "") '()]
+          [else 
+           (let ([matches (filter (lambda (cmd) (fuzzy-match? base-word cmd)) all-commands)])
+             (if has-bang?
+                 (map (lambda (m) (string-append m "!")) matches)
+                 matches))]))))
 
 ; ============================================================
 ; Rendering
@@ -192,6 +261,7 @@
   ; Completions use the menu style directly (gray background)
   (define completion-style menu-style)
   (define selected-completion-style (theme-scope "ui.menu.selected"))
+  (define directory-style (~> (theme-scope "ui.text.directory") (style-bg menu-bg)))
   
   ; Get config values
   (define cmd-width (hash-get *fine-cmdline-config* "width"))
@@ -265,21 +335,30 @@
   ; Render completions
   (when has-completions?
     (define completion-y (+ (area-y cmd-area) 2))
-    (define completion-list (slice completions 0 completion-height))
+    (define start (unbox (CmdlineState-window-start state)))
+    (define completion-list (slice completions start completion-height))
     
     (for-index (lambda (i comp)
-                 (define is-selected (= i completion-index))
+                 (define actual-index (+ i start))
+                 (define is-selected (= actual-index completion-index))
+                 ; Check if it's a directory (ends with /) for syntax highlighting
+                 (define is-dir (and (> (string-length comp) 0) 
+                                     (char=? (string-ref comp (- (string-length comp) 1)) #\/)))
+                 
                  ; Truncate if longer than width - avoid overflowing borders
                  (define display-comp (if (> (string-length comp) (- cmd-width 3))
                                          (string-append (substring comp 0 (- cmd-width 6)) "...")
                                          comp))
+                 
+                 (define final-style (cond [is-selected selected-completion-style]
+                                          [is-dir directory-style]
+                                          [else completion-style]))
+
                  (frame-set-string! frame
                                     (+ (area-x cmd-area) 1)
                                     (+ completion-y i)
                                     (string-append " " display-comp)
-                                    (if is-selected 
-                                        selected-completion-style 
-                                        completion-style)))
+                                    final-style))
                completion-list
                0)))
 
@@ -290,6 +369,46 @@
 (define (cmdline-cursor-handler state rect)
   (CmdlineState-cursor-position state))
 
+(define (update-input-from-completion state)
+  (define completions (unbox (CmdlineState-completions state)))
+  (define index (unbox (CmdlineState-completion-index state)))
+  (when (and (not (null? completions)) (>= index 0) (< index (length completions)))
+    (define comp (list-ref completions index))
+    (set-MutableTextField-text! (CmdlineState-input state) (reverse (string->list comp)))))
+
+(define (move-completion-cursor state delta update-input?)
+  (define completion-index-box (CmdlineState-completion-index state))
+  (define window-start-box (CmdlineState-window-start state))
+  (define completions (unbox (CmdlineState-completions state)))
+  (define max-completions (hash-get *fine-cmdline-config* "max-completions"))
+  
+  (when (> (length completions) 0)
+    (define current (unbox completion-index-box))
+    ; If nothing selected, start at -1 so delta 1 goes to 0
+    (define next (modulo (+ current delta) (length completions)))
+    (set-box! completion-index-box next)
+    
+    ; Adjust window-start
+    (define start (unbox window-start-box))
+    
+    (cond
+      ; Scrolling down past bottom
+      [(>= next (+ start max-completions))
+       (set-box! window-start-box (+ start 1))]
+      ; Scrolling up past top
+      [(< next start)
+       (set-box! window-start-box next)]
+      ; Wrapping from bottom to top
+      [(and (= next 0) (> current 0))
+       (set-box! window-start-box 0)]
+      ; Wrapping from top to bottom
+      [(and (= next (- (length completions) 1)) (< current next) (< current start))
+       (set-box! window-start-box (max 0 (- (length completions) max-completions)))]
+      [else void])
+    
+    (when update-input?
+      (update-input-from-completion state))))
+
 (define (cmdline-event-handler state event)
   (define char (key-event-char event))
   (define input-field (CmdlineState-input state))
@@ -297,6 +416,7 @@
   (define history-index (CmdlineState-history-index state))
   (define completions-box (CmdlineState-completions state))
   (define completion-index-box (CmdlineState-completion-index state))
+  (define window-start-box (CmdlineState-window-start state))
   (define all-commands (CmdlineState-all-commands state))
   
   (cond
@@ -308,23 +428,14 @@
      (when (> (string-length input-str) 0)
        (set-CmdlineState-history! state (cons input-str history))
        
-       (define parts (string-split-manual input-str))
-       (define cmd-name (car parts))
-       (define args (cdr parts))
-       
        (define completions (unbox completions-box))
+       (define completion-index (unbox completion-index-box))
        
-       ; Resolve shorthand/first match if not an exact match
-       (define resolved-cmd
-         (if (and (not (null? completions))
-                  (not (member cmd-name all-commands)))
-             (car completions)
-             cmd-name))
-             
+       ; First match logic: if completions exist, use the selected one or the first one
        (define cmd-to-execute
-         (if (null? args)
-             resolved-cmd
-             (string-append resolved-cmd " " (join-strings args " "))))
+         (if (not (null? completions))
+             (list-ref completions (if (= completion-index -1) 0 completion-index))
+             input-str))
              
        (execute-helix-command cmd-to-execute))
      event-result/close]
@@ -333,43 +444,54 @@
      (pop-char! input-field)
      (set-box! completions-box 
                 (get-completions (text-field->string input-field) all-commands))
-     (set-box! completion-index-box 0)
+     (set-box! completion-index-box -1)
+     (set-box! window-start-box 0)
      event-result/consume]
     
     [(key-event-tab? event)
-     (define completions (unbox completions-box))
-     (when (> (length completions) 0)
-       (define current (unbox completion-index-box))
-       (define next (if (equal? (key-event-modifier event) key-modifier-shift)
-                       (- current 1)
-                       (+ current 1)))
-       (set-box! completion-index-box 
-                  (modulo next (length completions))))
+     (if (equal? (key-event-modifier event) key-modifier-shift)
+         (move-completion-cursor state -1 #t)
+         (move-completion-cursor state 1 #t))
      event-result/consume]
     
     [(key-event-up? event)
-     (define h-index (unbox history-index))
-     (when (< h-index (length history))
-       (set-box! history-index (+ h-index 1))
-       (define hist-cmd (list-ref history h-index))
-       (set-MutableTextField-text! input-field (reverse (string->list hist-cmd))))
+     (define completions (unbox completions-box))
+     (if (and (not (null? completions)) (> (length completions) 0))
+         (move-completion-cursor state -1 #t)
+         (let ([h-index (unbox history-index)])
+           (when (< h-index (length history))
+             (set-box! history-index (+ h-index 1))
+             (define hist-cmd (list-ref history h-index))
+             (set-MutableTextField-text! input-field (reverse (string->list hist-cmd))))))
      event-result/consume]
     
     [(key-event-down? event)
-     (define h-index (unbox history-index))
-     (when (> h-index 0)
-       (set-box! history-index (- h-index 1))
-       (define hist-cmd (list-ref history (- h-index 1)))
-       (set-MutableTextField-text! input-field (reverse (string->list hist-cmd))))
-     (when (= h-index 0)
-       (set-MutableTextField-text! input-field '()))
+     (define completions (unbox completions-box))
+     (if (and (not (null? completions)) (> (length completions) 0))
+         (move-completion-cursor state 1 #t)
+         (let ([h-index (unbox history-index)])
+           (when (> h-index 0)
+             (set-box! history-index (- h-index 1))
+             (define hist-cmd (list-ref history (- h-index 1)))
+             (set-MutableTextField-text! input-field (reverse (string->list hist-cmd))))
+           (when (= h-index 0)
+             (set-MutableTextField-text! input-field '()))))
+     event-result/consume]
+    
+    ; Add C-p and C-n support for scrolling
+    [(and (equal? char #\p) (equal? (key-event-modifier event) key-modifier-ctrl))
+     (move-completion-cursor state -1 #t)
+     event-result/consume]
+    [(and (equal? char #\n) (equal? (key-event-modifier event) key-modifier-ctrl))
+     (move-completion-cursor state 1 #t)
      event-result/consume]
     
     [char
      (push-char! input-field char)
      (set-box! completions-box 
                 (get-completions (text-field->string input-field) all-commands))
-     (set-box! completion-index-box 0)
+     (set-box! completion-index-box -1)
+     (set-box! window-start-box 0)
      event-result/consume]
     
     [(mouse-event? event) 
@@ -393,6 +515,7 @@
                                 '()
                                 (box 0)
                                 (position 0 0)
+                                (box -1) ; Initialize to -1
                                 (box 0)
                                 initial-completions
                                 all-cmds)
