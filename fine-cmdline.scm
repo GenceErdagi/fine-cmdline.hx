@@ -117,33 +117,36 @@
 (define (get-all-commands)
   (list 
    "write" "quit" "qall" "save" "open" "buffer-close" "buffer-close-other"
-   "vsplit" "hsplit" "split" "new" "vnew"
-   "goto-line" "goto-char" "goto-start" "goto-end"
-   "find-char" "find-char-backward"
-   "replace" "replace-selection"
-   "insert-newline" "insert-char" "delete" "delete-selection"
-   "yank" "yank-line" "paste" "paste-before"
+   "vsplit" "hsplit" "split" "new" "vnew" "only" "next" "prev"
+   "goto-line" "goto-char" "goto-start" "goto-end" "goto-next-buffer" "goto-previous-buffer"
+   "find-char" "find-char-backward" "search" "search-backward" "search-next" "search-prev"
+   "replace" "replace-selection" "grep" "global-search"
+   "insert-newline" "insert-char" "delete" "delete-selection" "change-selection"
+   "yank" "yank-line" "paste" "paste-before" "replace-with-yanked"
    "undo" "redo" "repeat"
-   "select-all" "select-mode" "normal-mode" "insert-mode"
-   "extend" "extend-to-line" "extend-to-char"
-   "match-brackets" "wrap" "join"
-   "tab-switch" "tab-next" "tab-previous"
-   "window-mode" "view-mode"
-   "theme" "set" "get"
-   "run-shell-command" "term" "make"
-   "format" "format-selection"
-   "hover" "signature-help" "definition" "type-definition"
-   "references" "rename" "code-action"
-   "lint" "workspace-symbol" "document-symbol"
-   "extend-line" "extend-char" "extend-word"
-   "shell-pipeline" "pipe" "runnable"))
+   "select-all" "select-mode" "normal-mode" "insert-mode" "select-regex" "split-selection" "split-selection-on-newline"
+   "extend" "extend-to-line" "extend-to-char" "extend-line" "extend-char" "extend-word"
+   "match-brackets" "wrap" "join" "keep-lines" "remove-lines" "keep-primary-selection" "remove-primary-selection"
+   "tab-switch" "tab-next" "tab-previous" "tab-close" "tab-new"
+   "window-mode" "view-mode" "horizontal-split" "vertical-split"
+   "theme" "set" "get" "toggle" "set-language" "reload" "reload-all" "config-reload" "config-open"
+   "run-shell-command" "term" "make" "sh" "pipe" "shell-pipeline" "runnable"
+   "format" "format-selection" "indent" "unindent"
+   "hover" "signature-help" "definition" "type-definition" "implementation" "references" "rename" "code-action"
+   "lint" "workspace-symbol" "document-symbol" "diagnostics" "workspace-diagnostics"
+   "log-open" "tutor" "version" "clipboard-yank" "clipboard-paste-after" "clipboard-paste-before"
+   "buffer-next" "buffer-previous" "buffer" "b" "bd" "bdelete" "blist" "buffers"
+   "jump-backward" "jump-forward" "save-selection" "earlier" "later"
+   "tree-sitter-scopes" "tree-sitter-highlight-name" "tree-sitter-subtree"
+   "sort" "reverse" "unique"))
 
 ; Execute command using eval-string for one-to-one helix command compatibility
 (define (execute-helix-command cmd)
-  (when (and (string? cmd) (> (string-length cmd) 0))
-    (define expr (build-command-expr cmd))
-    (when (> (string-length expr) 0)
-      (eval-string expr))))
+  (with-handler (lambda (err) (set-error! (to-string err)))
+    (when (and (string? cmd) (> (string-length cmd) 0))
+      (define expr (build-command-expr cmd))
+      (when (> (string-length expr) 0)
+        (eval-string expr)))))
 
 ; ============================================================
 ; Completion Matching
@@ -167,6 +170,21 @@
     (if (< slen sublen)
         #f
         (string=? (substring s (- slen sublen) slen) suffix))))
+
+(define (is-false? x) (equal? x #false))
+
+(define (get-buffer-completions arg-to-complete prefix)
+  (let* ([doc-ids (editor-all-documents)]
+         [paths (map (lambda (id) (editor-document->path id)) doc-ids)]
+         ; document-path returns #false for unnamed buffers (scratch), filter them out
+         [valid-paths (filter (lambda (p) (and (not (void? p)) (not (is-false? p)))) paths)])
+    (map (lambda (p) (string-append prefix p))
+         (filter (lambda (p) (fuzzy-match? arg-to-complete p)) valid-paths))))
+
+(define (get-language-completions arg-to-complete prefix)
+  (let ([languages '("rust" "scheme" "python" "javascript" "typescript" "go" "cpp" "c" "markdown" "toml" "yaml" "json" "html" "css")])
+    (map (lambda (l) (string-append prefix l))
+         (filter (lambda (l) (fuzzy-match? arg-to-complete l)) languages))))
 
 (define (get-completions input all-commands)
   (if (string=? input "")
@@ -192,6 +210,12 @@
                 (let ([themes (themes->list)])
                   (map (lambda (t) (string-append prefix t))
                        (filter (lambda (t) (fuzzy-match? last-part t)) themes)))]
+               
+               [(member cmd '("buffer" "b" "bdelete" "bd"))
+                (get-buffer-completions last-part prefix)]
+               
+               [(member cmd '("set-language"))
+                (get-language-completions last-part prefix)]
                
                [(member cmd '("open" "e" "vsplit" "vs" "hsplit" "hs"))
                 (let* ([last-slash-pos (let loop ([chars (string->list last-part)] [last -1] [curr 0])
@@ -281,13 +305,15 @@
   ; Height: 1 input row + completion rows + 1 bottom border (top border at row 0)
   (define cmd-height (+ 3 completion-height))
   
-  ; Position calculation
+  ; Position calculation - Stable Vertical Anchor
+  ; We use a fixed height of 3 (the input box) for the initial centering calculation.
+  ; This ensures that the input line stays at the same Y-coordinate even when completions expand downwards.
   (define center-x (round (/ (- width cmd-width) 2)))
-  (define center-y (round (/ (- height cmd-height) 2)))
+  (define stable-center-y (round (/ (- height 3) 2)))
   
-  ; Apply offsets if configured
-  (define final-x (if offset-x (+ center-x offset-x) center-x))
-  (define final-y (if offset-y (+ center-y offset-y) center-y))
+  ; Apply offsets relative to this stable center
+  (define final-x (if (not (is-false? offset-x)) (+ center-x offset-x) center-x))
+  (define final-y (if (not (is-false? offset-y)) (+ stable-center-y offset-y) stable-center-y))
   (define final-y (max final-y 1))
   
   (define cmd-area (area (+ (area-x rect) final-x)
