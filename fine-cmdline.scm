@@ -39,6 +39,13 @@
        (helper (cdr chars) (cons (car chars) current) result)]))
   (helper (string->list s) '() '()))
 
+(define (join-strings lst sep)
+  (if (null? lst)
+      ""
+      (if (null? (cdr lst))
+          (car lst)
+          (string-append (car lst) sep (join-strings (cdr lst) sep)))))
+
 ; Build a Steel expression from command string
 (define (build-command-expr cmd)
   (define parts (string-split-manual cmd))
@@ -136,7 +143,17 @@
 (define (get-completions input all-commands)
   (if (string=? input "")
       all-commands
-      (filter (lambda (cmd) (fuzzy-match? input cmd)) all-commands)))
+      (let* ([parts (string-split-manual input)]
+             [first-word (if (null? parts) "" (car parts))]
+             [has-bang? (and (> (string-length first-word) 0)
+                             (char=? (string-ref first-word (- (string-length first-word) 1)) #\!))]
+             [base-word (if has-bang? (substring first-word 0 (- (string-length first-word) 1)) first-word)])
+        (if (string=? base-word "")
+            '()
+            (let ([matches (filter (lambda (cmd) (fuzzy-match? base-word cmd)) all-commands)])
+              (if has-bang?
+                  (map (lambda (m) (string-append m "!")) matches)
+                  matches))))))
 
 ; ============================================================
 ; Rendering
@@ -163,10 +180,17 @@
   (define prompt ": ")
   (define prompt-len 2)
   
-  ; Use native helix theme styles (like pickers/menus)
-  (define prompt-style (theme-scope "keyword"))
-  (define input-style (theme-scope "ui.text"))
-  (define completion-style (theme-scope "ui.menu"))
+  ; Use native helix theme styles
+  (define menu-style (theme-scope "ui.menu"))
+  (define menu-bg (style->bg menu-style))
+  
+  ; Create styles that use the menu background (the gray color)
+  (define prompt-style (~> (theme-scope "keyword") (style-bg menu-bg)))
+  (define input-style (~> (theme-scope "ui.text") (style-bg menu-bg)))
+  (define bg-style (~> (theme-scope "ui.background") (style-bg menu-bg)))
+  
+  ; Completions use the menu style directly (gray background)
+  (define completion-style menu-style)
   (define selected-completion-style (theme-scope "ui.menu.selected"))
   
   ; Get config values
@@ -201,14 +225,20 @@
                           cmd-width
                           cmd-height))
   
-  ; Use original background style with sharp borders, no overflow (matches original look)
-  (buffer/clear-with frame cmd-area (theme-scope "ui.background"))
+  ; Use the gray background for the entire area
+  (buffer/clear-with frame cmd-area bg-style)
   
+  ; Render the block with the gray background and white borders (from ui.background foreground)
   (block/render frame
                 cmd-area
-                (make-block (theme-scope "ui.background") 
-                           (theme-scope "ui.background") 
-                           "all" "plain"))
+                (make-block bg-style bg-style "all" "plain"))
+  
+  ; Add title to the top border - " Cmdline " with gray background to break the border line
+  (frame-set-string! frame
+                    (+ (area-x cmd-area) 1)
+                    (area-y cmd-area)
+                    " Cmdline "
+                    bg-style)
   
   (frame-set-string! frame 
                     (+ (area-x cmd-area) 1) 
@@ -216,15 +246,21 @@
                     prompt 
                     prompt-style)
   
+  ; Truncate input if it's too long
+  (define max-input-len (- cmd-width prompt-len 2))
+  (define display-input (if (> (string-length input-str) max-input-len)
+                            (substring input-str (- (string-length input-str) max-input-len) (string-length input-str))
+                            input-str))
+
   (frame-set-string! frame 
                     (+ (area-x cmd-area) prompt-len 1) 
                     (+ (area-y cmd-area) 1) 
-                    input-str 
+                    display-input 
                     input-style)
   
   (set-position-row! (CmdlineState-cursor-position state) (+ (area-y cmd-area) 1))
   (set-position-col! (CmdlineState-cursor-position state)
-                     (+ (area-x cmd-area) prompt-len 1 (string-length input-str)))
+                     (+ (area-x cmd-area) prompt-len 1 (string-length display-input)))
   
   ; Render completions
   (when has-completions?
@@ -233,9 +269,9 @@
     
     (for-index (lambda (i comp)
                  (define is-selected (= i completion-index))
-                 ; Truncate if longer than width
-                 (define display-comp (if (> (string-length comp) (- cmd-width 2))
-                                         (string-append (substring comp 0 (- cmd-width 5)) "...")
+                 ; Truncate if longer than width - avoid overflowing borders
+                 (define display-comp (if (> (string-length comp) (- cmd-width 3))
+                                         (string-append (substring comp 0 (- cmd-width 6)) "...")
                                          comp))
                  (frame-set-string! frame
                                     (+ (area-x cmd-area) 1)
@@ -268,10 +304,29 @@
      event-result/close]
     
     [(key-event-enter? event)
-     (define cmd (text-field->string input-field))
-     (when (> (string-length cmd) 0)
-       (set-CmdlineState-history! state (cons cmd history))
-       (execute-helix-command cmd))
+     (define input-str (text-field->string input-field))
+     (when (> (string-length input-str) 0)
+       (set-CmdlineState-history! state (cons input-str history))
+       
+       (define parts (string-split-manual input-str))
+       (define cmd-name (car parts))
+       (define args (cdr parts))
+       
+       (define completions (unbox completions-box))
+       
+       ; Resolve shorthand/first match if not an exact match
+       (define resolved-cmd
+         (if (and (not (null? completions))
+                  (not (member cmd-name all-commands)))
+             (car completions)
+             cmd-name))
+             
+       (define cmd-to-execute
+         (if (null? args)
+             resolved-cmd
+             (string-append resolved-cmd " " (join-strings args " "))))
+             
+       (execute-helix-command cmd-to-execute))
      event-result/close]
     
     [(key-event-backspace? event)
