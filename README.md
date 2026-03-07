@@ -1,4 +1,4 @@
-# helix-fine-cmdline
+# fine-cmdline.hx
 
 A fine-grained command line input for Helix, inspired by [fine-cmdline.nvim](https://github.com/vonheikemen/fine-cmdline.nvim).
 
