@@ -4,9 +4,55 @@
 (require "helix/components.scm")
 (require "helix/editor.scm")
 (require "helix/misc.scm")
+(require (prefix-in helix. "helix/commands.scm"))
+(require (prefix-in helix.static. "helix/static.scm"))
+(require "helix/ext.scm")
 
 (provide fine-cmdline
          fine-cmdline/open)
+
+; ============================================================
+; Helper Functions
+; ============================================================
+
+(define (for-index func lst index)
+  (if (null? lst)
+      void
+      (begin
+        (func index (car lst))
+        (for-index func (cdr lst) (+ index 1)))))
+
+; Manual string split - split by space
+(define (string-split-manual s)
+  (define (helper chars current result)
+    (cond
+      [(null? chars)
+       (if (null? current)
+           result
+           (reverse (cons (list->string (reverse current)) result)))]
+      [(char=? (car chars) #\space)
+       (helper (cdr chars) '() (if (null? current)
+                                    result
+                                    (cons (list->string (reverse current)) result)))]
+      [else
+       (helper (cdr chars) (cons (car chars) current) result)]))
+  (helper (string->list s) '() '()))
+
+; Build a Steel expression from command string
+(define (build-command-expr cmd)
+  (define parts (string-split-manual cmd))
+  (when (null? parts) (return! void))
+  (define cmd-name (car parts))
+  (define args (cdr parts))
+  
+  ; Build expression: (helix.cmd-name "arg1" "arg2" ...)
+  (define args-str 
+    (if (null? args)
+        ""
+        (string-append " " (apply string-append 
+                                (map (lambda (a) (string-append "\"" a "\" ")) args)))))
+  
+  (string-append "(helix." cmd-name args-str ")"))
 
 ; ============================================================
 ; Data Structures
@@ -19,9 +65,8 @@
    cursor-position                 ; Position - where cursor is rendered
    completion-index                ; Box int - selected completion
    completions                     ; Box list - available completions
-   all-commands) #:mutable)      ; List of all available commands
+   all-commands) #:mutable)
 
-; Mutable text field similar to picker.scm
 (struct MutableTextField (text) #:mutable)
 
 (define (push-char! field char)
@@ -40,12 +85,9 @@
 ; Command Execution
 ; ============================================================
 
-; Get list of available commands from helix
 (define (get-all-commands)
-  (require-builtin helix/core/keymaps as helix.keymaps.)
-  ; This is a basic list - in a full implementation, we'd get this from helix
   (list 
-   "write" "quit" "save" "open" "buffer-close" "buffer-close-other"
+   "write" "quit" "qall" "save" "open" "buffer-close" "buffer-close-other"
    "vsplit" "hsplit" "split" "new" "vnew"
    "goto-line" "goto-char" "goto-start" "goto-end"
    "find-char" "find-char-backward"
@@ -57,7 +99,7 @@
    "extend" "extend-to-line" "extend-to-char"
    "match-brackets" "wrap" "join"
    "tab-switch" "tab-next" "tab-previous"
-   "window-mode" "view-mode" "追"
+   "window-mode" "view-mode"
    "theme" "set" "get"
    "run-shell-command" "term" "make"
    "format" "format-selection"
@@ -65,21 +107,19 @@
    "references" "rename" "code-action"
    "lint" "workspace-symbol" "document-symbol"
    "extend-line" "extend-char" "extend-word"
-   "shell-pipeline" "pipe" "runnable"
-   ))
+   "shell-pipeline" "pipe" "runnable"))
 
-; Execute a command string
-(define (execute-cmdline cmd)
+; Execute command using eval-string for one-to-one helix command compatibility
+(define (execute-helix-command cmd)
   (when (and (string? cmd) (> (string-length cmd) 0))
-    ; Add to history (prepend)
-    ; For now, execute via run-shell-command with : prefix
-    (helix.run-shell-command ":" cmd)))
+    (define expr (build-command-expr cmd))
+    (when (> (string-length expr) 0)
+      (eval-string expr))))
 
 ; ============================================================
 ; Completion Matching
 ; ============================================================
 
-; Simple fuzzy match - returns #t if pattern matches text
 (define (fuzzy-match? pattern text)
   (define pattern-len (string-length pattern))
   (define text-len (string-length text))
@@ -92,7 +132,6 @@
          (loop (+ pi 1) (+ ti 1))]
         [else (loop pi (+ ti 1))]))))
 
-; Get completions for current input
 (define (get-completions input all-commands)
   (if (string=? input "")
       all-commands
@@ -103,78 +142,75 @@
 ; ============================================================
 
 (define (cmdline-render state rect frame)
-  ; Calculate dimensions
   (define width (area-width rect))
   (define height (area-height rect))
   
-  ; Input text
   (define input-str (text-field->string (CmdlineState-input state)))
-  
-  ; Get completions
   (define completions (unbox (CmdlineState-completions state)))
   (define completion-index (unbox (CmdlineState-completion-index state)))
   
-  ; Prompt
   (define prompt ": ")
   (define prompt-len 2)
   
-  ; Calculate input area
-  (define input-area-width (- width 4))
-  
-  ; Styles
   (define prompt-style (theme-scope "keyword"))
   (define input-style (theme-scope "ui.text"))
   (define completion-style (theme-scope "ui.text"))
   (define selected-completion-style 
     (~> (style)
         (style-bg (style->bg (theme-scope "ui.selection")))
-        (style-fg (style->fg (theme-scope "ui.text"))))
+        (style-fg (style->fg (theme-scope "ui.text")))))
   
-  ; Clear the area
-  (buffer/clear-with frame rect (theme-scope "ui.background"))
+  ; Calculate a smaller centered area for the input
+  (define cmd-width 60)
+  (define cmd-height (if (> (length completions) 0) 4 1))
   
-  ; Draw border
+  (define center-x (round (/ (- (area-width rect) cmd-width) 2)))
+  (define center-y (round (/ (area-height rect) 4)))
+  
+  (define cmd-area (area (+ (area-x rect) center-x)
+                          (+ (area-y rect) center-y)
+                          cmd-width
+                          cmd-height))
+  
+  (buffer/clear-with frame cmd-area (theme-scope "ui.background"))
+  
   (block/render frame
-                rect
+                cmd-area
                 (make-block (theme-scope "ui.background") 
                            (theme-scope "ui.background") 
                            "all" "rounded"))
   
-  ; Draw prompt
   (frame-set-string! frame 
-                    (+ (area-x rect) 1) 
-                    (+ (area-y rect) 1) 
+                    (+ (area-x cmd-area) 1) 
+                    (+ (area-y cmd-area) 1) 
                     prompt 
                     prompt-style)
   
-  ; Draw input
   (frame-set-string! frame 
-                    (+ (area-x rect) prompt-len 1) 
-                    (+ (area-y rect) 1) 
+                    (+ (area-x cmd-area) prompt-len 1) 
+                    (+ (area-y cmd-area) 1) 
                     input-str 
                     input-style)
   
-  ; Update cursor position
-  (set-position-row! (CmdlineState-cursor-position state) (+ (area-y rect) 1))
+  (set-position-row! (CmdlineState-cursor-position state) (+ (area-y cmd-area) 1))
   (set-position-col! (CmdlineState-cursor-position state)
-                     (+ (area-x rect) prompt-len 1 (string-length input-str)))
+                     (+ (area-x cmd-area) prompt-len 1 (string-length input-str)))
   
-  ; Draw completions (if any and input is not empty)
-  (when (and (> (length completions 0)) (> (string-length input) 0))
-    (define max-completions 5)
-    (define completion-y (+ (area-y rect) 3))
+  (when (and (> (length completions) 0) (> (string-length input-str) 0) (> cmd-height 1))
+    (define completion-y (+ (area-y cmd-area) 2))
+    (define completion-list (slice completions 0 (min 3 (length completions))))
     
-    (for-each (lambda (i comp)
-                 (when (< i max-completions)
-                   (define is-selected (= i completion-index))
-                   (frame-set-string! frame
-                                      (+ (area-x rect) 2)
-                                      (+ completion-y i)
-                                      (string-append "  " comp)
-                                      (if is-selected 
-                                          selected-completion-style 
-                                          completion-style))))
-               (range 0 (length completions)))))
+    (for-index (lambda (i comp)
+                 (define is-selected (= i completion-index))
+                 (frame-set-string! frame
+                                    (+ (area-x cmd-area) 1)
+                                    (+ completion-y i)
+                                    (string-append " " comp)
+                                    (if is-selected 
+                                        selected-completion-style 
+                                        completion-style)))
+               completion-list
+               0)))
 
 ; ============================================================
 ; Event Handling
@@ -193,29 +229,23 @@
   (define all-commands (CmdlineState-all-commands state))
   
   (cond
-    ; Escape - close
     [(key-event-escape? event) 
      event-result/close]
     
-    ; Enter - execute command
     [(key-event-enter? event)
      (define cmd (text-field->string input-field))
      (when (> (string-length cmd) 0)
-       ; Add to history
        (set-CmdlineState-history! state (cons cmd history))
-       (execute-cmdline cmd))
+       (execute-helix-command cmd))
      event-result/close]
     
-    ; Backspace - delete character
     [(key-event-backspace? event)
      (pop-char! input-field)
-     ; Update completions
      (set-box! completions-box 
                 (get-completions (text-field->string input-field) all-commands))
      (set-box! completion-index-box 0)
      event-result/consume]
     
-    ; Tab - cycle completions
     [(key-event-tab? event)
      (define completions (unbox completions-box))
      (when (> (length completions) 0)
@@ -227,40 +257,34 @@
                   (modulo next (length completions))))
      event-result/consume]
     
-    ; Up arrow - history navigation
     [(key-event-up? event)
      (define h-index (unbox history-index))
      (when (< h-index (length history))
        (set-box! history-index (+ h-index 1))
-       (define hist-cmd (list-ref history (- h-index 1)))
+       (define hist-cmd (list-ref history h-index))
        (set-MutableTextField-text! input-field (reverse (string->list hist-cmd))))
      event-result/consume]
     
-    ; Down arrow - history navigation
     [(key-event-down? event)
      (define h-index (unbox history-index))
      (when (> h-index 0)
        (set-box! history-index (- h-index 1))
-       (define hist-cmd (list-ref history h-index))
+       (define hist-cmd (list-ref history (- h-index 1)))
        (set-MutableTextField-text! input-field (reverse (string->list hist-cmd))))
      (when (= h-index 0)
        (set-MutableTextField-text! input-field '()))
      event-result/consume]
     
-    ; Regular character input
     [char
      (push-char! input-field char)
-     ; Update completions
      (set-box! completions-box 
                 (get-completions (text-field->string input-field) all-commands))
      (set-box! completion-index-box 0)
      event-result/consume]
     
-    ; Mouse events - ignore for now
     [(mouse-event? event) 
      event-result/ignore]
     
-    ; Default - ignore but don't close
     [else 
      event-result/ignore]))
 
@@ -276,15 +300,14 @@
   (push-component! 
    (new-component! "fine-cmdline"
                    (CmdlineState input-field
-                                '()                 ; history
-                                (box 0)             ; history-index
-                                (position 0 0)      ; cursor position
-                                (box 0)             ; completion-index
-                                initial-completions ; completions
-                                all-cmds)           ; all commands
+                                '()
+                                (box 0)
+                                (position 0 0)
+                                (box 0)
+                                initial-completions
+                                all-cmds)
                    cmdline-render
                    (hash "handle_event" cmdline-event-handler
                          "cursor" cmdline-cursor-handler))))
 
-; Backwards compatibility alias
 (define fine-cmdline fine-cmdline/open)
