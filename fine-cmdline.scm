@@ -163,13 +163,11 @@
   (define prompt ": ")
   (define prompt-len 2)
   
+  ; Use native helix theme styles (like pickers/menus)
   (define prompt-style (theme-scope "keyword"))
   (define input-style (theme-scope "ui.text"))
-  (define completion-style (theme-scope "ui.text"))
-  (define selected-completion-style 
-    (~> (style)
-        (style-bg (style->bg (theme-scope "ui.selection")))
-        (style-fg (style->fg (theme-scope "ui.text")))))
+  (define completion-style (theme-scope "ui.menu"))
+  (define selected-completion-style (theme-scope "ui.menu.selected"))
   
   ; Get config values
   (define cmd-width (hash-get *fine-cmdline-config* "width"))
@@ -203,13 +201,14 @@
                           cmd-width
                           cmd-height))
   
+  ; Use original background style with sharp borders, no overflow (matches original look)
   (buffer/clear-with frame cmd-area (theme-scope "ui.background"))
   
   (block/render frame
                 cmd-area
                 (make-block (theme-scope "ui.background") 
                            (theme-scope "ui.background") 
-                           "all" "rounded"))
+                           "all" "plain"))
   
   (frame-set-string! frame 
                     (+ (area-x cmd-area) 1) 
