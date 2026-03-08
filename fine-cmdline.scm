@@ -39,26 +39,6 @@
        (helper (cdr chars) (cons (car chars) current) result)]))
   (helper (string->list s) '() '()))
 
-(define (get-directory-part path)
-  (define (find-last-slash chars last-slash-pos current-pos)
-    (cond [(null? chars) last-slash-pos]
-          [(char=? (car chars) #\/) (find-last-slash (cdr chars) current-pos (+ current-pos 1))]
-          [else (find-last-slash (cdr chars) last-slash-pos (+ current-pos 1))]))
-  (define last-pos (find-last-slash (string->list path) -1 0))
-  (if (= last-pos -1)
-      "."
-      (if (= last-pos 0)
-          "/"
-          (substring path 0 last-pos))))
-
-(define (get-file-part path)
-  (define (find-last-slash chars last-slash-pos current-pos)
-    (cond [(null? chars) last-slash-pos]
-          [(char=? (car chars) #\/) (find-last-slash (cdr chars) current-pos (+ current-pos 1))]
-          [else (find-last-slash (cdr chars) last-slash-pos (+ current-pos 1))]))
-  (define last-pos (find-last-slash (string->list path) -1 0))
-  (substring path (+ last-pos 1) (string-length path)))
-
 (define (join-strings lst sep)
   (if (null? lst)
       ""
@@ -254,10 +234,20 @@
 
 ; Configuration for fine-cmdline
 (define *fine-cmdline-config* 
-  (hash "width" 60
-        "max-completions" 8
+  (hash "width" 100
+        "max-completions" 10
         "offset-x" #f  ; #f = center, or specify offset
-        "offset-y" #f)) ; #f = center, or specify offset
+        "offset-y" #f  ; #f = center/top, or specify offset
+        "anchor" 'top  ; 'top or 'center
+        "show-title" #t
+        "title-text" " Cmdline "
+        "prompt-text" ": "
+        "show-border" #t
+        "border-type" "plain" ; "plain", "rounded", "double", "thick"
+        "bg-scope" "ui.menu"  ; Theme scope for background (e.g. "ui.menu", "ui.background")
+        "border-scope" "ui.background" ; Theme scope for borders (inherits foreground)
+        "fill-on-tab" #t      ; Fill input field when tabbing through completions
+        "auto-execute-first" #t)) ; If Enter is pressed without moving cursor, execute first match
 
 (define (fine-cmdline-config! key value)
   (set! *fine-cmdline-config* (hash-insert *fine-cmdline-config* key value)))
@@ -270,28 +260,38 @@
   (define completions (unbox (CmdlineState-completions state)))
   (define completion-index (unbox (CmdlineState-completion-index state)))
   
-  (define prompt ": ")
-  (define prompt-len 2)
-  
-  ; Use native helix theme styles
-  (define menu-style (theme-scope "ui.menu"))
-  (define menu-bg (style->bg menu-style))
-  
-  ; Create styles that use the menu background (the gray color)
-  (define prompt-style (~> (theme-scope "keyword") (style-bg menu-bg)))
-  (define input-style (~> (theme-scope "ui.text") (style-bg menu-bg)))
-  (define bg-style (~> (theme-scope "ui.background") (style-bg menu-bg)))
-  
-  ; Completions use the menu style directly (gray background)
-  (define completion-style menu-style)
-  (define selected-completion-style (theme-scope "ui.menu.selected"))
-  (define directory-style (~> (theme-scope "ui.text.directory") (style-bg menu-bg)))
-  
   ; Get config values
   (define cmd-width (hash-get *fine-cmdline-config* "width"))
   (define max-completions (hash-get *fine-cmdline-config* "max-completions"))
   (define offset-x (hash-get *fine-cmdline-config* "offset-x"))
   (define offset-y (hash-get *fine-cmdline-config* "offset-y"))
+  (define anchor (hash-get *fine-cmdline-config* "anchor"))
+  (define show-title (hash-get *fine-cmdline-config* "show-title"))
+  (define title-text (hash-get *fine-cmdline-config* "title-text"))
+  (define prompt (hash-get *fine-cmdline-config* "prompt-text"))
+  (define prompt-len (string-length prompt))
+  (define show-border (hash-get *fine-cmdline-config* "show-border"))
+  (define border-type (hash-get *fine-cmdline-config* "border-type"))
+  (define bg-scope (hash-get *fine-cmdline-config* "bg-scope"))
+  (define border-scope (hash-get *fine-cmdline-config* "border-scope"))
+  
+  ; Use native helix theme styles
+  (define bg-theme-style (theme-scope bg-scope))
+  (define bg-color (style->bg bg-theme-style))
+  
+  ; Create styles that use the configured background
+  (define prompt-style (~> (theme-scope "keyword") (style-bg bg-color)))
+  (define input-style (~> (theme-scope "ui.text") (style-bg bg-color)))
+  (define base-bg-style (~> (theme-scope "ui.background") (style-bg bg-color)))
+  
+  ; Completions use the configured background
+  (define completion-style (~> (theme-scope "ui.menu") (style-bg bg-color)))
+  (define selected-completion-style (theme-scope "ui.menu.selected"))
+  (define directory-style (~> (theme-scope "ui.text.directory") (style-bg bg-color)))
+  
+  ; Border style
+  (define border-theme-style (theme-scope border-scope))
+  (define border-style (~> border-theme-style (style-bg bg-color)))
   
   ; Dynamic height based on completions
   (define num-completions (length completions))
@@ -302,18 +302,19 @@
                                (min num-completions max-completions)
                                0))
   
-  ; Height: 1 input row + completion rows + 1 bottom border (top border at row 0)
-  (define cmd-height (+ 3 completion-height))
+  ; Border adjustments
+  (define padding (if show-border 1 0))
+  (define cmd-height (+ (* padding 2) 1 completion-height))
   
-  ; Position calculation - Stable Vertical Anchor
-  ; We use a fixed height of 3 (the input box) for the initial centering calculation.
-  ; This ensures that the input line stays at the same Y-coordinate even when completions expand downwards.
+  ; Position calculation - Reference point is the input line
   (define center-x (round (/ (- width cmd-width) 2)))
-  (define stable-center-y (round (/ (- height 3) 2)))
+  (define reference-y (if (equal? anchor 'top)
+                          (round (/ height 5)) ; Top anchor: 20% down
+                          (round (/ (- height 3) 2)))) ; Center anchor
   
-  ; Apply offsets relative to this stable center
+  ; Apply offsets relative to the anchor
   (define final-x (if (not (is-false? offset-x)) (+ center-x offset-x) center-x))
-  (define final-y (if (not (is-false? offset-y)) (+ stable-center-y offset-y) stable-center-y))
+  (define final-y (if (not (is-false? offset-y)) (+ reference-y offset-y) reference-y))
   (define final-y (max final-y 1))
   
   (define cmd-area (area (+ (area-x rect) final-x)
@@ -321,46 +322,48 @@
                           cmd-width
                           cmd-height))
   
-  ; Use the gray background for the entire area
-  (buffer/clear-with frame cmd-area bg-style)
+  ; Use the background for the entire area
+  (buffer/clear-with frame cmd-area base-bg-style)
   
-  ; Render the block with the gray background and white borders (from ui.background foreground)
-  (block/render frame
-                cmd-area
-                (make-block bg-style bg-style "all" "plain"))
+  ; Render the block/border
+  (when show-border
+    (block/render frame
+                  cmd-area
+                  (make-block base-bg-style border-style "all" border-type)))
   
-  ; Add title to the top border - " Cmdline " with gray background to break the border line
-  (frame-set-string! frame
-                    (+ (area-x cmd-area) 1)
-                    (area-y cmd-area)
-                    " Cmdline "
-                    bg-style)
+  ; Optional title (only if borders are shown)
+  (when (and show-title show-border)
+    (frame-set-string! frame
+                      (+ (area-x cmd-area) 1)
+                      (area-y cmd-area)
+                      title-text
+                      border-style))
   
   (frame-set-string! frame 
-                    (+ (area-x cmd-area) 1) 
-                    (+ (area-y cmd-area) 1) 
+                    (+ (area-x cmd-area) padding) 
+                    (+ (area-y cmd-area) padding) 
                     prompt 
                     prompt-style)
   
   ; Truncate input if it's too long
-  (define max-input-len (- cmd-width prompt-len 2))
+  (define max-input-len (- cmd-width prompt-len (* padding 2)))
   (define display-input (if (> (string-length input-str) max-input-len)
                             (substring input-str (- (string-length input-str) max-input-len) (string-length input-str))
                             input-str))
 
   (frame-set-string! frame 
-                    (+ (area-x cmd-area) prompt-len 1) 
-                    (+ (area-y cmd-area) 1) 
+                    (+ (area-x cmd-area) prompt-len padding) 
+                    (+ (area-y cmd-area) padding) 
                     display-input 
                     input-style)
   
-  (set-position-row! (CmdlineState-cursor-position state) (+ (area-y cmd-area) 1))
+  (set-position-row! (CmdlineState-cursor-position state) (+ (area-y cmd-area) padding))
   (set-position-col! (CmdlineState-cursor-position state)
-                     (+ (area-x cmd-area) prompt-len 1 (string-length display-input)))
+                     (+ (area-x cmd-area) prompt-len padding (string-length display-input)))
   
   ; Render completions
   (when has-completions?
-    (define completion-y (+ (area-y cmd-area) 2))
+    (define completion-y (+ (area-y cmd-area) padding 1))
     (define start (unbox (CmdlineState-window-start state)))
     (define completion-list (slice completions start completion-height))
     
@@ -372,8 +375,9 @@
                                      (char=? (string-ref comp (- (string-length comp) 1)) #\/)))
                  
                  ; Truncate if longer than width - avoid overflowing borders
-                 (define display-comp (if (> (string-length comp) (- cmd-width 3))
-                                         (string-append (substring comp 0 (- cmd-width 6)) "...")
+                 (define max-comp-len (- cmd-width (* padding 2) 1))
+                 (define display-comp (if (> (string-length comp) max-comp-len)
+                                         (string-append (substring comp 0 (- max-comp-len 3)) "...")
                                          comp))
                  
                  (define final-style (cond [is-selected selected-completion-style]
@@ -381,7 +385,7 @@
                                           [else completion-style]))
 
                  (frame-set-string! frame
-                                    (+ (area-x cmd-area) 1)
+                                    (+ (area-x cmd-area) padding)
                                     (+ completion-y i)
                                     (string-append " " display-comp)
                                     final-style))
@@ -445,6 +449,10 @@
   (define window-start-box (CmdlineState-window-start state))
   (define all-commands (CmdlineState-all-commands state))
   
+  ; Config options
+  (define fill-on-tab (hash-get *fine-cmdline-config* "fill-on-tab"))
+  (define auto-execute (hash-get *fine-cmdline-config* "auto-execute-first"))
+  
   (cond
     [(key-event-escape? event) 
      event-result/close]
@@ -457,9 +465,10 @@
        (define completions (unbox completions-box))
        (define completion-index (unbox completion-index-box))
        
-       ; First match logic: if completions exist, use the selected one or the first one
+       ; First match logic
        (define cmd-to-execute
-         (if (not (null? completions))
+         (if (and (not (null? completions)) 
+                  (or (not (= completion-index -1)) auto-execute))
              (list-ref completions (if (= completion-index -1) 0 completion-index))
              input-str))
              
@@ -476,14 +485,14 @@
     
     [(key-event-tab? event)
      (if (equal? (key-event-modifier event) key-modifier-shift)
-         (move-completion-cursor state -1 #t)
-         (move-completion-cursor state 1 #t))
+         (move-completion-cursor state -1 fill-on-tab)
+         (move-completion-cursor state 1 fill-on-tab))
      event-result/consume]
     
     [(key-event-up? event)
      (define completions (unbox completions-box))
      (if (and (not (null? completions)) (> (length completions) 0))
-         (move-completion-cursor state -1 #t)
+         (move-completion-cursor state -1 fill-on-tab)
          (let ([h-index (unbox history-index)])
            (when (< h-index (length history))
              (set-box! history-index (+ h-index 1))
@@ -494,7 +503,7 @@
     [(key-event-down? event)
      (define completions (unbox completions-box))
      (if (and (not (null? completions)) (> (length completions) 0))
-         (move-completion-cursor state 1 #t)
+         (move-completion-cursor state 1 fill-on-tab)
          (let ([h-index (unbox history-index)])
            (when (> h-index 0)
              (set-box! history-index (- h-index 1))
@@ -506,10 +515,10 @@
     
     ; Add C-p and C-n support for scrolling
     [(and (equal? char #\p) (equal? (key-event-modifier event) key-modifier-ctrl))
-     (move-completion-cursor state -1 #t)
+     (move-completion-cursor state -1 fill-on-tab)
      event-result/consume]
     [(and (equal? char #\n) (equal? (key-event-modifier event) key-modifier-ctrl))
-     (move-completion-cursor state 1 #t)
+     (move-completion-cursor state 1 fill-on-tab)
      event-result/consume]
     
     [char
