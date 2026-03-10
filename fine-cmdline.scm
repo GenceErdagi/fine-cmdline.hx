@@ -23,21 +23,23 @@
         (func index (car lst))
         (for-index func (cdr lst) (+ index 1)))))
 
-; Manual string split - split by space
+; Improved string split - handles quotes and spaces
 (define (string-split-manual s)
-  (define (helper chars current result)
+  (define (helper chars current result in-quotes)
     (cond
       [(null? chars)
        (if (null? current)
-           result
+           (reverse result)
            (reverse (cons (list->string (reverse current)) result)))]
-      [(char=? (car chars) #\space)
-       (helper (cdr chars) '() (if (null? current)
-                                    result
-                                    (cons (list->string (reverse current)) result)))]
+      [(char=? (car chars) #\")
+       (helper (cdr chars) current result (not in-quotes))]
+      [(and (char=? (car chars) #\space) (not in-quotes))
+       (if (null? current)
+           (helper (cdr chars) '() result #f)
+           (helper (cdr chars) '() (cons (list->string (reverse current)) result) #f))]
       [else
-       (helper (cdr chars) (cons (car chars) current) result)]))
-  (helper (string->list s) '() '()))
+       (helper (cdr chars) (cons (car chars) current) result in-quotes)]))
+  (helper (string->list s) '() '() #f))
 
 (define (join-strings lst sep)
   (if (null? lst)
@@ -48,7 +50,12 @@
 
 ; Build a Steel expression from command string
 (define (build-command-expr cmd)
-  (define parts (string-split-manual cmd))
+  ; Strip leading colon if present (e.g. from script input)
+  (define clean-cmd (if (and (> (string-length cmd) 0) 
+                             (char=? (string-ref cmd 0) #\:))
+                        (substring cmd 1 (string-length cmd))
+                        cmd))
+  (define parts (string-split-manual clean-cmd))
   (when (null? parts) (return! void))
   (define cmd-name (car parts))
   (define args (cdr parts))
