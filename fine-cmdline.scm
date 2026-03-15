@@ -1038,7 +1038,7 @@
                    (define indices (get-fuzzy-indices pattern comp))
 
                    ; Truncate if longer than width - avoid overflowing borders
-                   (define max-comp-len (- cmd-width (* padding 2) 1))
+                   (define max-comp-len (- cmd-width (* padding 2) prompt-len))
                    (define display-comp (if (> (string-length comp) max-comp-len)
                                            (string-append (substring comp 0 (- max-comp-len 3)) "...")
                                            comp))
@@ -1056,15 +1056,18 @@
                                               [is-auto-active auto-active-style]
                                               [else (~> base-comp-style (style-fg fuzzy-highlight-fg))]))
 
-                   (frame-set-string! frame (+ (area-x cmd-area) padding) (+ completion-y i) " " base-comp-style)
+                   ; Render indentation/prefix to align with input text (after prompt)
+                   (define prefix-fill (apply string-append (map (lambda (_) " ") (range 0 prompt-len))))
+                   (frame-set-string! frame (+ (area-x cmd-area) padding) (+ completion-y i) prefix-fill base-comp-style)
+                   
                    (render-highlighted-string frame 
-                                             (+ (area-x cmd-area) padding 1) 
+                                             (+ (area-x cmd-area) padding prompt-len) 
                                              (+ completion-y i) 
                                              display-comp 
                                              indices 
                                              base-comp-style 
                                              match-char-style
-                                             (- cmd-width (* padding 2) 1)))
+                                             (- cmd-width (* padding 2) prompt-len)))
                  completion-list
                  0))
     
