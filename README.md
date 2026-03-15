@@ -84,6 +84,76 @@ You can modify the `get-all-commands` function in `fine-cmdline.scm` to add or r
 
 Currently commands are executed via helix's built-in command runner. The command string is passed to helix with a `:` prefix.
 
+## Maintaining Commands
+
+The command list in `fine-cmdline.scm` is derived directly from the Helix source code. To keep the plugin up-to-date with new Helix releases, you can extract the structured command data yourself.
+
+### Source of Truth
+All typable commands are defined in the Helix repository at:
+`helix-term/src/commands/typed.rs`
+
+The commands are stored in the `TYPABLE_COMMAND_LIST` array. Each entry contains:
+- **name**: The canonical command name.
+- **aliases**: Shorthands (e.g., `wq`, `vs`).
+- **doc**: The help text displayed in the plugin tooltip.
+- **completer**: Defines the argument type (filename, buffer, theme, etc.).
+
+### Automated Extraction Script
+You can use the following Python script to parse the Helix source and generate the Scheme-compatible lists for `*helix-shorthands*` and `get-all-commands`.
+
+```python
+import re
+import sys
+
+# Path to your local helix repository
+HELIX_SOURCE = "path/to/helix/helix-term/src/commands/typed.rs"
+
+def extract_commands(file_path):
+    with open(file_path, "r") as f:
+        content = f.read()
+
+    # Matches TypableCommand blocks
+    matches = re.finditer(r"TypableCommand\s*\{(.*?)\}", content, re.DOTALL)
+
+    shorthands = []
+    commands_with_docs = []
+
+    for match in matches:
+        block = match.group(1)
+        
+        name_match = re.search(r"name:\s*\"([^\"]+)\"", block)
+        doc_match = re.search(r"doc:\s*\"([^\"]+)\"", block)
+        
+        if name_match and doc_match:
+            name = name_match.group(1)
+            doc = doc_match.group(1).replace("\"", "\\\"")
+            
+            commands_with_docs.append((name, doc))
+            
+            aliases_match = re.search(r"aliases:\s*&\[([^\]]+)\]", block)
+            if aliases_match:
+                aliases_str = aliases_match.group(1)
+                aliases = [a.strip().strip("\"") for a in aliases_str.split(",")]
+                for alias in aliases:
+                    if alias:
+                        shorthands.append((alias, name))
+                        commands_with_docs.append((alias, f"Alias for :{name}. {doc}"))
+
+    shorthands.sort()
+    commands_with_docs.sort()
+
+    print("--- Copy to *helix-shorthands* ---")
+    for alias, target in shorthands:
+        print(f'        "{alias}" "{target}"')
+
+    print("\n--- Copy to get-all-commands ---")
+    for name, doc in commands_with_docs:
+        print(f'   ("{name}" . "{doc}")')
+
+if __name__ == "__main__":
+    extract_commands(HELIX_SOURCE)
+```
+
 ## Requirements
 
 - Helix with Steel plugin system enabled

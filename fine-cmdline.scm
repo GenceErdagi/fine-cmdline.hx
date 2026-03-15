@@ -36,6 +36,8 @@
 (define (save-history-to-disk history)
   (let ([path (get-history-file-path)])
     (with-handler (lambda (err) (set-error! (string-append "Failed to save history: " (to-string err))))
+      (when (path-exists? path)
+        (delete-file! path))
       (let ([port (open-output-file path)])
         (display "'(" port)
         (for-each (lambda (h) 
@@ -52,23 +54,36 @@
         (func index (car lst))
         (for-index func (cdr lst) (+ index 1)))))
 
-; Improved string split - handles quotes and spaces
+(define (string-trim s)
+  (define (trim-left chars)
+    (cond [(null? chars) '()]
+          [(char-whitespace? (car chars)) (trim-left (cdr chars))]
+          [else chars]))
+  (define (trim-right chars)
+    (reverse (trim-left (reverse chars))))
+  (list->string (trim-right (trim-left (string->list s)))))
+
+; Improved string split - handles quotes, spaces, and escaping
 (define (string-split-manual s)
-  (define (helper chars current result in-quotes)
+  (define (helper chars current result in-quotes escaped)
     (cond
       [(null? chars)
        (if (null? current)
            (reverse result)
            (reverse (cons (list->string (reverse current)) result)))]
+      [escaped
+       (helper (cdr chars) (cons (car chars) current) result in-quotes #f)]
+      [(char=? (car chars) #\\)
+       (helper (cdr chars) current result in-quotes #t)]
       [(char=? (car chars) #\")
-       (helper (cdr chars) current result (not in-quotes))]
+       (helper (cdr chars) current result (not in-quotes) #f)]
       [(and (char=? (car chars) #\space) (not in-quotes))
        (if (null? current)
-           (helper (cdr chars) '() result #f)
-           (helper (cdr chars) '() (cons (list->string (reverse current)) result) #f))]
+           (helper (cdr chars) '() result #f #f)
+           (helper (cdr chars) '() (cons (list->string (reverse current)) result) #f #f))]
       [else
-       (helper (cdr chars) (cons (car chars) current) result in-quotes)]))
-  (helper (string->list s) '() '() #f))
+       (helper (cdr chars) (cons (car chars) current) result in-quotes #f)]))
+  (helper (string->list (string-trim s)) '() '() #f #f))
 
 (define (join-strings lst sep)
   (if (null? lst)
@@ -155,18 +170,23 @@
 (define (is-false? x) (equal? x #false))
 
 (define (resolve-shorthand cmd)
-  (let ([resolved (hash-try-get *helix-shorthands* cmd)])
-    (if (is-false? resolved)
-        cmd
-        resolved)))
+  (if (is-false? cmd)
+      #f
+      (let ([resolved (hash-try-get *helix-shorthands* cmd)])
+        (if (is-false? resolved)
+            cmd
+            resolved))))
 
 (define (build-command-expr cmd)
   (call/cc (lambda (return)
     ; Strip leading colon if present (e.g. from script input)
-    (define clean-cmd (if (and (> (string-length cmd) 0) 
-                               (char=? (string-ref cmd 0) #\:))
-                          (substring cmd 1 (string-length cmd))
-                          cmd))
+    (define clean-cmd (let ([trimmed (string-trim cmd)])
+                        (if (and (> (string-length trimmed) 0) 
+                                 (char=? (string-ref trimmed 0) #\:))
+                            (substring trimmed 1 (string-length trimmed))
+                            trimmed)))
+    (when (string=? clean-cmd "") (return void))
+    
     (define parts (string-split-manual clean-cmd))
     (when (null? parts) (return void))
     
@@ -238,7 +258,6 @@
 
 (define (get-all-commands)
   '(
-   ("!" . "Alias for :run-shell-command. Run a shell command")
    ("add_newline_above" . "Add newline above.")
    ("add_newline_below" . "Add newline below.")
    ("align_selections" . "Align selections.")
@@ -249,22 +268,6 @@
    ("append-output" . "Run shell command, appending output after each selection.")
    ("append_char_interactive" . "Append char interactively.")
    ("append_mode" . "Switch to append mode.")
-   ("bc" . "Alias for :buffer-close. Close the current buffer.")
-   ("bc!" . "Alias for :buffer-close!. Close the current buffer forcefully, ignoring unsaved changes.")
-   ("bca" . "Alias for :buffer-close-all. Close all buffers without quitting.")
-   ("bca!" . "Alias for :buffer-close-all!. Force close all buffers ignoring unsaved changes without quitting.")
-   ("bclose" . "Alias for :buffer-close. Close the current buffer.")
-   ("bclose!" . "Alias for :buffer-close!. Close the current buffer forcefully, ignoring unsaved changes.")
-   ("bcloseall" . "Alias for :buffer-close-all. Close all buffers without quitting.")
-   ("bcloseall!" . "Alias for :buffer-close-all!. Force close all buffers ignoring unsaved changes without quitting.")
-   ("bcloseother" . "Alias for :buffer-close-others. Close all buffers but the currently focused one.")
-   ("bcloseother!" . "Alias for :buffer-close-others!. Force close all buffers but the currently focused one.")
-   ("bco" . "Alias for :buffer-close-others. Close all buffers but the currently focused one.")
-   ("bco!" . "Alias for :buffer-close-others!. Force close all buffers but the currently focused one.")
-   ("bn" . "Alias for :buffer-next. Goto next buffer.")
-   ("bnext" . "Alias for :buffer-next. Goto next buffer.")
-   ("bp" . "Alias for :buffer-previous. Goto previous buffer.")
-   ("bprev" . "Alias for :buffer-previous. Goto previous buffer.")
    ("buffer-close" . "Close the current buffer.")
    ("buffer-close!" . "Close the current buffer forcefully, ignoring unsaved changes.")
    ("buffer-close-all" . "Close all buffers without quitting.")
@@ -274,9 +277,7 @@
    ("buffer-next" . "Goto next buffer.")
    ("buffer-previous" . "Goto previous buffer.")
    ("buffer_picker" . "Open buffer picker.")
-   ("cd" . "Alias for :change-current-directory. Change the current working directory.")
    ("change-current-directory" . "Change the current working directory.")
-   ("char" . "Alias for :character-info. Get info about the character under the primary cursor.")
    ("character-info" . "Get info about the character under the primary cursor.")
    ("clear-register" . "Clear given register. If no argument is provided, clear all registers.")
    ("clipboard-paste-after" . "Paste system clipboard after selections.")
@@ -293,13 +294,9 @@
    ("config-open" . "Open the user config.toml file.")
    ("config-open-workspace" . "Open the workspace config.toml file.")
    ("config-reload" . "Refresh user config.")
-   ("cq" . "Alias for :cquit. Quit with exit code (default 1). Accepts an optional integer exit code (:cq 2).")
-   ("cq!" . "Alias for :cquit!. Force quit with exit code (default 1) ignoring unsaved changes. Accepts an optional integer exit code (:cq! 2).")
    ("cquit" . "Quit with exit code (default 1). Accepts an optional integer exit code (:cq 2).")
    ("cquit!" . "Force quit with exit code (default 1) ignoring unsaved changes. Accepts an optional integer exit code (:cq! 2).")
-   ("dbg" . "Alias for :debug-start. Start a debug session from a given template with given parameters.")
-   ("dbg-tcp" . "Alias for :debug-remote. Connect to a debug adapter by TCP address and start a debugging session from a given template with given parameters.")
-   ("debug-eval" . "Evaluate expression in current debug context.")
+   ("debug-eval" . "Evaluate expression in current_selection debug context.")
    ("debug-remote" . "Connect to a debug adapter by TCP address and start a debugging session from a given template with given parameters.")
    ("debug-start" . "Start a debug session from a given template with given parameters.")
    ("decrement" . "Decrement under cursor.")
@@ -310,13 +307,7 @@
    ("delete_word_backward" . "Delete word backward.")
    ("delete_word_forward" . "Delete word forward.")
    ("diagnostics_picker" . "Open diagnostics picker.")
-   ("diffg" . "Alias for :reset-diff-change. Reset the diff change at the cursor position.")
-   ("diffget" . "Alias for :reset-diff-change. Reset the diff change at the cursor position.")
-   ("e" . "Alias for :open. Open a file from disk into the current view.")
-   ("ear" . "Alias for :earlier. Jump back to an earlier point in edit history. Accepts a number of steps or a time span.")
-   ("earlier" . "Jump back to an earlier point in edit history. Accepts a number of steps or a time span.")
    ("echo" . "Prints the given arguments to the statusline.")
-   ("edit" . "Alias for :open. Open a file from disk into the current view.")
    ("encoding" . "Set encoding. Based on `https://encoding.spec.whatwg.org`.")
    ("enqueue-expression-in-engine" . "Enqueue expression in engine.")
    ("ensure_selections_forward" . "Ensure selections are forward.")
@@ -373,11 +364,8 @@
    ("find_prev_char" . "Find prev char.")
    ("find_till_char" . "Find till char.")
    ("flip_selections" . "Flip selections.")
-   ("fmt" . "Alias for :format. Format the file using an external formatter or language server.")
    ("format" . "Format the file using an external formatter or language server.")
    ("format_selections" . "Format selections.")
-   ("g" . "Alias for :goto. Goto line number.")
-   ("get" . "Alias for :get-option. Get the current value of a config option.")
    ("get-current-column-number" . "Get current column number.")
    ("get-current-line-character" . "Get current line character.")
    ("get-current-line-number" . "Get current line number.")
@@ -443,9 +431,7 @@
    ("goto_word" . "Goto word.")
    ("half_page_down" . "Half page down.")
    ("half_page_up" . "Half page up.")
-   ("hnew" . "Alias for :hsplit-new. Open a scratch buffer in a horizontal split.")
    ("hover" . "Open hover info.")
-   ("hs" . "Alias for :hsplit. Open the file in a horizontal split.")
    ("hsplit" . "Open the file in a horizontal split.")
    ("hsplit-new" . "Open a scratch buffer in a horizontal split.")
    ("hsplit_new" . "Open a scratch buffer in a horizontal split.")
@@ -475,10 +461,7 @@
    ("keep_selections" . "Keep selections.")
    ("kill_to_line_end" . "Kill to line end.")
    ("kill_to_line_start" . "Kill to line start.")
-   ("lang" . "Alias for :set-language. Set the language of current buffer (show current language if no value specified).")
    ("last_picker" . "Open last picker.")
-   ("lat" . "Alias for :later. Jump to a later point in edit history. Accepts a number of steps or a time span.")
-   ("later" . "Jump to a later point in edit history. Accepts a number of steps or a time span.")
    ("line-ending" . "Set the document's default line ending. Options: crlf, lf.")
    ("load-buffer!" . "Load current buffer.")
    ("log-open" . "Open the helix log file.")
@@ -493,14 +476,10 @@
    ("merge_selections" . "Merge selections.")
    ("move" . "Move the current buffer and its corresponding file to a different path")
    ("move!" . "Move the current buffer and its corresponding file to a different path creating necessary subdirectories")
-   ("mv" . "Alias for :move. Move the current buffer and its corresponding file to a different path")
-   ("mv!" . "Alias for :move!. Move the current buffer and its corresponding file to a different path creating necessary subdirectories")
-   ("n" . "Alias for :new. Create a new scratch buffer.")
    ("new" . "Create a new scratch buffer.")
    ("no_op" . "No operation.")
    ("noop" . "Does nothing.")
    ("normal_mode" . "Switch to normal mode.")
-   ("o" . "Alias for :open. Open a file from disk into the current view.")
    ("open" . "Open a file from disk into the current view.")
    ("open_above" . "Open newline above.")
    ("open_below" . "Open newline below.")
@@ -524,16 +503,10 @@
    ("primary-clipboard-yank" . "Yank main selection into system primary clipboard.")
    ("primary-clipboard-yank-join" . "Yank joined selections into system primary clipboard. A separator can be provided as first argument. Default value is newline.")
    ("push-range-to-selection!" . "Push range to selection.")
-   ("pwd" . "Alias for :show-directory. Show the current working directory.")
-   ("q" . "Alias for :quit. Close the current view.")
-   ("q!" . "Alias for :quit!. Force close the current view, ignoring unsaved changes.")
-   ("qa" . "Alias for :quit-all. Close all views.")
-   ("qa!" . "Alias for :quit-all!. Force close all views ignoring unsaved changes.")
    ("quit" . "Close the current view.")
    ("quit!" . "Force close the current view, ignoring unsaved changes.")
    ("quit-all" . "Close all views.")
    ("quit-all!" . "Force close all views ignoring unsaved changes.")
-   ("r" . "Alias for :read. Load a file into buffer")
    ("range" . "Create range.")
    ("range->from" . "Get range from.")
    ("range->selection" . "Get range selection.")
@@ -542,7 +515,7 @@
    ("range-anchor" . "Get range anchor.")
    ("range-head" . "Get range head.")
    ("read" . "Load a file into buffer")
-   ("record_macro" . "Record macro.")
+   ("record_macro" . "Record_macro.")
    ("redo" . "Redo last change.")
    ("redraw" . "Clear and re-render the whole UI")
    ("reflow" . "Hard-wrap the current selection of lines to a given width.")
@@ -562,8 +535,6 @@
    ("replay_macro" . "Replay macro.")
    ("reset-diff-change" . "Reset the diff change at the cursor position.")
    ("reverse_selection_contents" . "Reverse selection contents.")
-   ("rl" . "Alias for :reload. Discard changes and reload from the source file.")
-   ("rla" . "Alias for :reload-all. Discard changes and reload all documents from the source files.")
    ("rotate_selection_contents_backward" . "Rotate selection contents backward.")
    ("rotate_selection_contents_forward" . "Rotate selection contents forward.")
    ("rotate_selections_backward" . "Rotate selections backward.")
@@ -598,13 +569,11 @@
    ("selection->primary-index" . "Get primary index of selection.")
    ("selection->primary-range" . "Get primary range of selection.")
    ("selection->ranges" . "Get ranges of selection.")
-   ("set" . "Alias for :set-option. Set a config option at runtime.\nFor example to disable smart case search, use `:set search.smart-case false`.")
    ("set-current-selection-object!" . "Set current selection object.")
    ("set-current-selection-primary-index!" . "Set current selection primary index.")
    ("set-language" . "Set the language of current buffer (show current language if no value specified).")
    ("set-option" . "Set a config option at runtime.\nFor example to disable smart case search, use `:set search.smart-case false`.")
    ("set-register" . "Set contents of the given register.")
-   ("sh" . "Alias for :run-shell-command. Run a shell command")
    ("shell_append_output" . "Shell append output.")
    ("shell_insert_output" . "Shell insert output.")
    ("shell_keep_pipe" . "Shell keep pipe.")
@@ -617,7 +586,6 @@
    ("signature_help" . "Open signature help.")
    ("smart_tab" . "Smart tab.")
    ("sort" . "Sort ranges in selection.")
-   ("sp" . "Alias for :hsplit. Open the file in a horizontal split.")
    ("split_selection" . "Split selection.")
    ("split_selection_on_newline" . "Split selection on newline.")
    ("surround_add" . "Add surrounding.")
@@ -636,7 +604,6 @@
    ("syntax_workspace_symbol_picker" . "Open syntax workspace symbol picker.")
    ("theme" . "Change the editor theme (show current theme if no name specified).")
    ("till_prev_char" . "Till prev char.")
-   ("toggle" . "Alias for :toggle-option. Toggle a config option at runtime.\nFor example to toggle smart case search, use `:toggle search.smart-case`.")
    ("toggle-option" . "Toggle a config option at runtime.\nFor example to toggle smart case search, use `:toggle search.smart-case`.")
    ("toggle_block_comments" . "Toggle block comments.")
    ("toggle_comments" . "Toggle comments.")
@@ -647,31 +614,13 @@
    ("tree-sitter-scopes" . "Display tree sitter scopes, primarily for theming and development.")
    ("tree-sitter-subtree" . "Display the smallest tree-sitter subtree that spans the primary selection, primarily for debugging queries.")
    ("trim_selections" . "Trim selections.")
-   ("ts-subtree" . "Alias for :tree-sitter-subtree. Display the smallest tree-sitter subtree that spans the primary selection, primarily for debugging queries.")
    ("tutor" . "Open the tutorial.")
-   ("u" . "Alias for :update. Write changes only if the file has been modified.")
    ("undo" . "Undo last change.")
    ("unindent" . "Unindent selection.")
    ("update" . "Write changes only if the file has been modified.")
-   ("vnew" . "Alias for :vsplit-new. Open a scratch buffer in a vertical split.")
-   ("vs" . "Alias for :vsplit. Open the file in a vertical split.")
    ("vsplit" . "Open the file in a vertical split.")
    ("vsplit-new" . "Open a scratch buffer in a vertical split.")
    ("vsplit_new" . "Open a scratch buffer in a vertical split.")
-   ("w" . "Alias for :write. Write changes to disk. Accepts an optional path (:write some/path.txt)")
-   ("w!" . "Alias for :write!. Force write changes to disk creating necessary subdirectories. Accepts an optional path (:write! some/path.txt)")
-   ("wa" . "Alias for :write-all. Write changes from all buffers to disk.")
-   ("wa!" . "Alias for :write-all!. Forcefully write changes from all buffers to disk creating necessary subdirectories.")
-   ("wbc" . "Alias for :write-buffer-close. Write changes to disk and closes the buffer. Accepts an optional path (:write-buffer-close some/path.txt)")
-   ("wbc!" . "Alias for :write-buffer-close!. Force write changes to disk creating necessary subdirectories and closes the buffer. Accepts an optional path (:write-buffer-close! some/path.txt)")
-   ("wclose" . "Write and close.")
-   ("wonly" . "Write and keep only current buffer.")
-   ("workspace_diagnostics_picker" . "Open workspace diagnostics picker.")
-   ("workspace_symbol_picker" . "Open workspace symbol picker.")
-   ("wq" . "Alias for :write-quit. Write changes to disk and close the current view. Accepts an optional path (:wq some/path.txt)")
-   ("wq!" . "Alias for :write-quit!. Write changes to disk and close the current view forcefully. Accepts an optional path (:wq! some/path.txt)")
-   ("wqa" . "Alias for :write-quit-all. Write changes from all buffers to disk and close all views.")
-   ("wqa!" . "Alias for :write-quit-all!. Forcefully write changes from all buffers to disk, creating necessary subdirectories, and close all views (ignoring unsaved changes).")
    ("write" . "Write changes to disk. Accepts an optional path (:write some/path.txt)")
    ("write!" . "Force write changes to disk creating necessary subdirectories. Accepts an optional path (:write! some/path.txt)")
    ("write-all" . "Write changes from all buffers to disk.")
@@ -698,7 +647,8 @@
    ("yank_main_selection_to_primary_clipboard" . "Yank main selection to primary clipboard.")
    ("yank_to_clipboard" . "Yank to clipboard.")
    ("yank_to_primary_clipboard" . "Yank to primary clipboard.")
-   ("|" . "Alias for :pipe. Pipe each selection to the shell command.")))
+   ("workspace_diagnostics_picker" . "Open workspace diagnostics picker.")
+   ("workspace_symbol_picker" . "Open workspace symbol picker.")))
 
 ; Execute command using eval-string for one-to-one helix command compatibility
 (define (execute-helix-command cmd)
@@ -723,23 +673,39 @@
   (cond
     [(= pattern-len 0) 1]
     [(string=? pattern text) 1000]
-    [(and (>= text-len pattern-len) (string=? pattern (substring text 0 pattern-len))) 80]
+    [(and (>= text-len pattern-len) (string=? (string-downcase pattern) (substring (string-downcase text) 0 pattern-len))) 80]
     [else 
      (let loop ([pi 0] [ti 0] [score 0] [at-boundary #t])
        (cond
          [(= pi pattern-len) score]
          [(= ti text-len) 0] ; Failed to match all characters
          [else
-          (let ([p-char (string-ref pattern pi)]
-                [t-char (string-ref text ti)])
+          (let ([p-char (char-downcase (string-ref pattern pi))]
+                [t-char (char-downcase (string-ref text ti))])
             (if (char=? p-char t-char)
                 (let ([new-score (+ score (if at-boundary 50 10))])
                   (loop (+ pi 1) (+ ti 1) new-score #f))
-                (let ([is-boundary (or (char=? t-char #\-) (char=? t-char #\_))])
+                (let ([is-boundary (or (char=? t-char #\-) (char=? t-char #\_) (char=? t-char #\/))])
                   (loop pi (+ ti 1) score is-boundary))))]))]))
 
 (define (fuzzy-match? pattern text)
   (> (fuzzy-score pattern text) 0))
+
+(define (get-fuzzy-indices pattern text)
+  (define pattern-len (string-length pattern))
+  (define text-len (string-length text))
+  (if (= pattern-len 0)
+      '()
+      (let loop ([pi 0] [ti 0] [indices '()])
+        (cond
+          [(= pi pattern-len) (reverse indices)]
+          [(= ti text-len) '()]
+          [else
+           (let ([p-char (char-downcase (string-ref pattern pi))]
+                 [t-char (char-downcase (string-ref text ti))])
+             (if (char=? p-char t-char)
+                 (loop (+ pi 1) (+ ti 1) (cons ti indices))
+                 (loop pi (+ ti 1) indices)))]))))
 
 (define (string-ends-with? s suffix)
   (let ([slen (string-length s)]
@@ -761,6 +727,59 @@
     (map (lambda (l) (string-append prefix l))
          (filter (lambda (l) (fuzzy-match? arg-to-complete l)) languages))))
 
+(define (get-setting-completions arg-to-complete prefix)
+  (let ([settings '("indent-heuristic" "atomic-save" "lsp" "search" "auto-pairs" "continue-comments" "popup-border" "cursor-shape" "whitespace" "indent-guides" "scrolloff" "scroll_lines" "mouse" "shell" "jump-label-alphabet" "line-number" "cursorline" "cursorcolumn" "middle-click-paste" "auto-completion" "auto-format" "auto-save" "text-width" "idle-timeout" "completion-timeout" "preview-completion-insert" "completion-trigger-len" "completion-replace" "auto-info" "true-color" "insert-final-newline" "color-modes" "gutters" "undercurl" "terminal" "rulers" "bufferline" "workspace-lsp-roots" "default-line-ending" "smart-tab" "rainbow-brackets")])
+    (map (lambda (s) (string-append prefix s))
+         (filter (lambda (s) (fuzzy-match? arg-to-complete s)) settings))))
+
+(define (get-file-completions arg-to-complete prefix)
+  (let* ([last-slash-pos (let loop ([chars (string->list arg-to-complete)] [last -1] [curr 0])
+                           (cond [(null? chars) last]
+                                 [(char=? (car chars) #\/) (loop (cdr chars) curr (+ curr 1))]
+                                 [else (loop (cdr chars) last (+ curr 1))]))]
+         [dir-to-read (cond [(= last-slash-pos -1) "."]
+                            [(= last-slash-pos 0) "/"]
+                            [else (substring arg-to-complete 0 last-slash-pos)])]
+         [dir-prefix (if (= last-slash-pos -1) "" (substring arg-to-complete 0 (+ last-slash-pos 1)))]
+         [file-p (substring arg-to-complete (+ last-slash-pos 1) (string-length arg-to-complete))]
+         [entries (if (is-dir? dir-to-read) (read-dir dir-to-read) '())])
+    (map (lambda (e) 
+           (let* ([m (file-name e)]
+                  [full-path (string-append (if (string=? dir-to-read ".") "" 
+                                                (if (string-ends-with? dir-to-read "/") 
+                                                    dir-to-read 
+                                                    (string-append dir-to-read "/"))) m)]
+                  [display-path (string-append dir-prefix m (if (is-dir? full-path) "/" ""))])
+             (string-append prefix display-path)))
+         (filter (lambda (e) (fuzzy-match? file-p (file-name e))) entries))))
+
+(define (get-argument-completions cmd last-part prefix parts)
+  (let* ([resolved (resolve-shorthand cmd)]
+         [is-at-end (string=? last-part "")]
+         [num-full-args (if is-at-end (- (length parts) 1) (- (length parts) 2))])
+    (cond
+      [(member resolved '("theme"))
+       (if (> num-full-args 0)
+           '()
+           (let ([themes (themes->list)])
+             (map (lambda (t) (string-append prefix t))
+                  (sort (filter (lambda (t) (fuzzy-match? last-part t)) themes)
+                        (lambda (a b) (> (fuzzy-score last-part a) (fuzzy-score last-part b)))))))]
+      
+      [(member resolved '("buffer" "buffer-close" "buffer-close!" "buffer-close-all" "buffer-close-all!" "buffer-close-others" "buffer-close-others!" "buffer-next" "buffer-previous"))
+       (if (> num-full-args 0) '() (get-buffer-completions last-part prefix))]
+      
+      [(member resolved '("set-language"))
+       (if (> num-full-args 0) '() (get-language-completions last-part prefix))]
+      
+      [(member resolved '("set" "set-option" "toggle" "toggle-option"))
+       (if (>= num-full-args 2) '() (get-setting-completions last-part prefix))]
+      
+      [(member resolved '("open" "vsplit" "hsplit" "read" "move"))
+       (if (> num-full-args 0) '() (get-file-completions last-part prefix))]
+      
+      [else '()])))
+
 (define (get-completions input all-commands-with-docs)
   (define all-commands (map car all-commands-with-docs))
   (if (string=? input "")
@@ -781,52 +800,25 @@
                                  (list-ref parts (- (length parts) 1)))]
                   [prefix (substring input 0 (- (string-length input) (string-length last-part)))])
              
-             (cond
-               [(member cmd '("theme"))
-                (let ([themes (themes->list)])
-                  (map (lambda (t) (string-append prefix t))
-                       (sort (filter (lambda (t) (fuzzy-match? last-part t)) themes)
-                             (lambda (a b) (> (fuzzy-score last-part a) (fuzzy-score last-part b))))))]
-               
-               [(member cmd '("buffer" "b" "bdelete" "bd"))
-                (get-buffer-completions last-part prefix)]
-               
-               [(member cmd '("set-language"))
-                (get-language-completions last-part prefix)]
-               
-               [(member cmd '("open" "e" "vsplit" "vs" "hsplit" "hs"))
-                (let* ([last-slash-pos (let loop ([chars (string->list last-part)] [last -1] [curr 0])
-                                         (cond [(null? chars) last]
-                                               [(char=? (car chars) #\/) (loop (cdr chars) curr (+ curr 1))]
-                                               [else (loop (cdr chars) last (+ curr 1))]))]
-                       [dir-to-read (cond [(= last-slash-pos -1) "."]
-                                          [(= last-slash-pos 0) "/"]
-                                          [else (substring last-part 0 last-slash-pos)])]
-                       [dir-prefix (if (= last-slash-pos -1) "" (substring last-part 0 (+ last-slash-pos 1)))]
-                       [file-p (substring last-part (+ last-slash-pos 1) (string-length last-part))]
-                       [entries (if (is-dir? dir-to-read) (read-dir dir-to-read) '())])
-                  (map (lambda (e) 
-                         (let* ([m (file-name e)]
-                                [full-path (string-append (if (string=? dir-to-read ".") "" 
-                                                              (if (string-ends-with? dir-to-read "/") 
-                                                                  dir-to-read 
-                                                                  (string-append dir-to-read "/"))) m)]
-                                [display-path (string-append dir-prefix m (if (is-dir? full-path) "/" ""))])
-                           (string-append prefix display-path)))
-                       (filter (lambda (e) (fuzzy-match? file-p (file-name e))) entries)))]
-               
-               [else '()]))]
+             (get-argument-completions cmd last-part prefix parts))]
           
           ; Command completion
           [(string=? base-word "") '()]
           [else 
-           (let* ([scored-matches (map (lambda (cmd) (cons cmd (fuzzy-score base-word cmd))) all-commands)]
+           (let* ([shorthand-target (resolve-shorthand base-word)]
+                  [has-exact-shorthand? (and (not (equal? shorthand-target base-word)) 
+                                             (member shorthand-target all-commands))]
+                  [scored-matches (map (lambda (cmd) (cons cmd (fuzzy-score base-word cmd))) all-commands)]
                   [filtered-matches (filter (lambda (p) (> (cdr p) 0)) scored-matches)]
                   [sorted-matches (sort filtered-matches (lambda (a b) (> (cdr a) (cdr b))))]
-                  [matches (map car sorted-matches)])
+                  [matches (map car sorted-matches)]
+                  ; Prioritize exact shorthand target if it exists
+                  [final-matches (if has-exact-shorthand?
+                                    (cons shorthand-target (filter (lambda (m) (not (string=? m shorthand-target))) matches))
+                                    matches)])
              (if has-bang?
-                 (map (lambda (m) (string-append m "!")) matches)
-                 matches))]))))
+                 (map (lambda (m) (string-append m "!")) final-matches)
+                 final-matches))]))))
 
 ; ============================================================
 ; Rendering
@@ -852,6 +844,31 @@
 (define (fine-cmdline-config! key value)
   (set! *fine-cmdline-config* (hash-insert *fine-cmdline-config* key value)))
 
+(define (render-highlighted-string frame x y text indices base-style highlight-style width)
+  (define len (string-length text))
+  (let loop ([i 0] [curr-x x] [rem-indices indices])
+    (cond
+      [(= i len) 
+       ; Fill the rest of the line with base-style
+       (when (< (- curr-x x) width)
+         (frame-set-string! frame curr-x y (apply string-append (map (lambda (_) " ") (range 0 (- width (- curr-x x))))) base-style))]
+      [(and (not (null? rem-indices)) (= i (car rem-indices)))
+       ; Find end of consecutive highlighted indices
+       (let h-loop ([j i] [rj rem-indices])
+         (if (and (< j len) (not (null? rj)) (= j (car rj)))
+             (h-loop (+ j 1) (cdr rj))
+             (begin
+               (frame-set-string! frame curr-x y (substring text i j) highlight-style)
+               (loop j (+ curr-x (- j i)) rj))))]
+      [else
+       ; Find end of consecutive non-highlighted characters
+       (let n-loop ([j i])
+         (if (or (= j len) (and (not (null? rem-indices)) (= j (car rem-indices))))
+             (begin
+               (frame-set-string! frame curr-x y (substring text i j) base-style)
+               (loop j (+ curr-x (- j i)) rem-indices))
+             (n-loop (+ j 1))))])))
+
 (define (cmdline-render state rect frame)
   (define width (area-width rect))
   (define height (area-height rect))
@@ -876,6 +893,7 @@
   (define border-type (hash-get *fine-cmdline-config* "border-type"))
   (define bg-scope (hash-get *fine-cmdline-config* "bg-scope"))
   (define border-scope (hash-get *fine-cmdline-config* "border-scope"))
+  (define auto-execute (hash-get *fine-cmdline-config* "auto-execute-first"))
   
   ; Use native helix theme styles
   (define bg-theme-style (theme-scope bg-scope))
@@ -888,7 +906,18 @@
   
   ; Completions use the configured background
   (define completion-style (~> (theme-scope "ui.menu") (style-bg bg-color)))
-  (define selected-completion-style (theme-scope "ui.menu.selected"))
+  
+  ; Fuzzy Highlight Style (foreground from 'special')
+  (define fuzzy-highlight-fg (style->fg (theme-scope "special")))
+  
+  ; Selection/Active Styles
+  ; If manually selected (Tab): Use ui.menu.selected
+  (define manual-selected-style (theme-scope "ui.menu.selected"))
+  
+  ; If auto-active (first match): Use special color as background
+  ; We use ui.background color for text on top of the special background
+  (define auto-active-style (~> completion-style (style-bg fuzzy-highlight-fg) (style-fg bg-color)))
+  
   (define directory-style (~> (theme-scope "ui.text.directory") (style-bg bg-color)))
   
   ; Border style
@@ -898,6 +927,12 @@
   ; Dynamic height based on completions
   (define num-completions (length completions))
   (define has-completions? (and (> num-completions 0) (> (string-length input-str) 0)))
+  
+  ; Determine if we are in argument mode
+  (define parts (string-split-manual input-str))
+  (define is-arg-mode (or (> (length parts) 1) 
+                          (and (> (string-length input-str) 0) 
+                               (char=? (string-ref input-str (- (string-length input-str) 1)) #\space))))
   
   ; completion-height is number of completion rows to display
   (define completion-height (if has-completions?
@@ -910,7 +945,11 @@
         (let* ([comp-name (list-ref completions completion-index)]
                [doc-pair (assoc comp-name all-commands)])
           (if doc-pair (cdr doc-pair) #f))
-        #f))
+        (if (and has-completions? (= completion-index -1) auto-execute (not is-arg-mode))
+            (let* ([comp-name (car completions)]
+                   [doc-pair (assoc comp-name all-commands)])
+              (if doc-pair (cdr doc-pair) #f))
+            #f)))
   
   (define show-doc? (not (is-false? selected-doc)))
   (define doc-height (if show-doc? 2 0)) ; 1 line doc + 1 line separator/padding
@@ -980,30 +1019,54 @@
     (define start (unbox (CmdlineState-window-start state)))
     (define completion-list (slice completions start completion-height))
     
-    (for-index (lambda (i comp)
-                 (define actual-index (+ i start))
-                 (define is-selected (= actual-index completion-index))
-                 ; Check if it's a directory (ends with /) for syntax highlighting
-                 (define is-dir (and (> (string-length comp) 0) 
-                                     (char=? (string-ref comp (- (string-length comp) 1)) #\/)))
-                 
-                 ; Truncate if longer than width - avoid overflowing borders
-                 (define max-comp-len (- cmd-width (* padding 2) 1))
-                 (define display-comp (if (> (string-length comp) max-comp-len)
-                                         (string-append (substring comp 0 (- max-comp-len 3)) "...")
-                                         comp))
-                 
-                 (define final-style (cond [is-selected selected-completion-style]
-                                          [is-dir directory-style]
-                                          [else completion-style]))
+    ; Determine pattern for highlighting
+    (let* ([last-part (if (char=? (string-ref input-str (- (string-length input-str) 1)) #\space)
+                          ""
+                          (if (null? parts) "" (list-ref parts (- (length parts) 1))))]
+           [pattern (if is-arg-mode last-part (if (null? parts) "" (car parts)))])
+      
+      (for-index (lambda (i comp)
+                   (define actual-index (+ i start))
+                   (define is-tab-selected (= actual-index completion-index))
+                   (define is-auto-active (and (= completion-index -1) (= actual-index 0) auto-execute (not is-arg-mode)))
+                   
+                   ; Check if it's a directory (ends with /) for syntax highlighting
+                   (define is-dir (and (> (string-length comp) 0) 
+                                       (char=? (string-ref comp (- (string-length comp) 1)) #\/)))
+                   
+                   ; Get indices for highlighting
+                   (define indices (get-fuzzy-indices pattern comp))
 
-                 (frame-set-string! frame
-                                    (+ (area-x cmd-area) padding)
-                                    (+ completion-y i)
-                                    (string-append " " display-comp)
-                                    final-style))
-               completion-list
-               0)
+                   ; Truncate if longer than width - avoid overflowing borders
+                   (define max-comp-len (- cmd-width (* padding 2) 1))
+                   (define display-comp (if (> (string-length comp) max-comp-len)
+                                           (string-append (substring comp 0 (- max-comp-len 3)) "...")
+                                           comp))
+                   
+                   (define base-comp-style (cond [is-tab-selected manual-selected-style]
+                                                [is-auto-active auto-active-style]
+                                                [is-dir directory-style]
+                                                [else completion-style]))
+                   
+                   ; Matched chars highlighting:
+                   ; If row is highlighted, matched chars should probably just be regular text (since bg is highlight)
+                   ; but to keep visual consistency, we can use a slightly different style or keep it same as base
+                   (define match-char-style (cond 
+                                              [is-tab-selected manual-selected-style]
+                                              [is-auto-active auto-active-style]
+                                              [else (~> base-comp-style (style-fg fuzzy-highlight-fg))]))
+
+                   (frame-set-string! frame (+ (area-x cmd-area) padding) (+ completion-y i) " " base-comp-style)
+                   (render-highlighted-string frame 
+                                             (+ (area-x cmd-area) padding 1) 
+                                             (+ completion-y i) 
+                                             display-comp 
+                                             indices 
+                                             base-comp-style 
+                                             match-char-style
+                                             (- cmd-width (* padding 2) 1)))
+                 completion-list
+                 0))
     
     ; Render documentation tooltip
     (when show-doc?
@@ -1100,12 +1163,22 @@
        (define completions (unbox completions-box))
        (define completion-index (unbox completion-index-box))
        
-       ; First match logic
+       ; Check if we are in argument mode
+       (define parts (string-split-manual input-str))
+       (define is-arg-mode (or (> (length parts) 1) 
+                               (char=? (string-ref input-str (- (string-length input-str) 1)) #\space)))
+
+       ; Execution logic:
+       ; 1. If an item is explicitly selected (index != -1), use it.
+       ; 2. If no item selected, and it's a command (not arg mode), and auto-execute is true, use first match.
+       ; 3. Otherwise, use literal input.
        (define cmd-to-execute
-         (if (and (not (null? completions)) 
-                  (or (not (= completion-index -1)) auto-execute))
-             (list-ref completions (if (= completion-index -1) 0 completion-index))
-             input-str))
+         (cond
+           [(and (not (null? completions)) (not (= completion-index -1)))
+            (list-ref completions completion-index)]
+           [(and (not (null? completions)) (not is-arg-mode) auto-execute)
+            (car completions)]
+           [else input-str]))
              
        (execute-helix-command cmd-to-execute))
      event-result/close]
